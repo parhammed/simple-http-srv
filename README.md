@@ -1,2 +1,7 @@
 # simple-http-srv
-A simple web 1 backend code with python socket 
+
+**WARING:** this isn't a real HTTP server
+
+
+A simple server that transfer files through http protocol
+

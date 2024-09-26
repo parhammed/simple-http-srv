@@ -1,0 +1,12 @@
+{
+  "HOST": "0.0.0.0",
+  "PORT": 80,
+  "SHOW_DIR": true,
+  "VALID_HOSTS": ["localhost", "127.0.0.1"],
+  "DIR": "www",
+  "ERROR_BODIES": "error_bodies",
+  "INDEX": "www/index.html",
+  "HEADERS": {
+    "Server": "Simple HTTP Server By Parhammed"
+  }
+}

@@ -1,66 +1,79 @@
-import socket as s
-from os import path
-import re
+from os.path import join
+import asyncio
+from collections import defaultdict
+import hashlib
+from utils import http_status, settings, open_path, get_header
 
-srv = s.socket(s.AF_INET, s.SOCK_STREAM)
-srv.bind(('', 2000))
-hrp_re = re.compile(r"(?P<method>[^ \n\r]+) (?P<url>[^ \n\r]+) (?P<version>[^ \n\r]+)\r\n"
-                    r"(?P<heads>([^\r\n]+\r\n)*)\r\n(?P<data>(.*\n?)*)"
-)
-public_html = path.join(path.dirname(__file__), "public_html")
-srv.listen(1)
-print("ready")
+with open(join('.', settings['INDEX']), 'rb') as index_file:
+    index = index_file.read()
 
-# http request parser
-def hrp(data):
-    if not data:
-        return {
-            "method": "",
-            "url": "",
-            "version": "",
-            "header": {},
-            "data": "",
-        }
-    print(data)
-    match = hrp_re.match(data)
-    header = {}
-    heads =match.group("heads")
-    for item in heads.split("\r\n")[:-1]:
-        item = item.split(": ")
-        header[item[0]] = item[1]
 
-    return {
-        "method": match.group("method"),
-        "url": match.group("url"),
-        "version": match.group("version"),
-        "header": header,
-        "data": match.group("data"),
-    }
-
-# http reponse maker
-def hrm(version: str, status_code: int, message: str, header: dict, body: bytes):
-    header["Content-Length"] = len(body)
-    header_str = "".join((f"{key}: {value}\r\n" for key, value in header.items()))
-    return f"{version} {status_code} {message}\r\n{header_str}\r\n".encode("utf-8") + body
-
-while True:
-    cli, addr = srv.accept()
-    data = hrp(cli.recv(1024).decode("utf"))
-    print(data["version"])
-    if data["url"] == "/":
-        url = public_html + "/index.html"
+async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    if reader.at_eof():
+        writer.close()
+        await writer.wait_closed()
+        return
+    method = (await reader.readuntil(b' '))[:-1].upper()
+    path = (await reader.readuntil(b' '))[:-1]
+    version = (await reader.readuntil(b'\r\n'))[:-2]
+    if version != b"HTTP/1.1":
+        raise
+    headers = defaultdict(list)
+    while True:
+        header = (await reader.readuntil(b'\r\n')).strip()
+        if not header:
+            break
+        key, value = header.split(b":", 1)
+        headers[key.strip().upper()].append(value.strip())
+    response = b""
+    etag = b""
+    if method in (b'GET', b'HEAD'):
+        path = path.split(b"?", 1)[0].split(b"#", 1)[0]
+        print(repr(path))
+        if path in (b"", b"/"):
+            response = index
+            status = 200
+        else:
+            try:
+                response = await open_path(path)
+            except FileNotFoundError:
+                # response = errors_bodies["404.html"]
+                status = 404
+            except ValueError:
+                # response = errors_bodies['invalid_path.html']
+                status = 400
+            else:
+                status = 200 if response else 204
+    elif method in (b"POST", b"PUT", b"DELETE", b"CONNECT", b"OPTIONS", b"TRACE", b"PATCH"):
+        status = 405
     else:
-        url = public_html + data["url"]
-    
-    try:
-        file=  open(url, "rb")
-    except Exception:
-        print("not found")
-        file=open(public_html + "/404.html", "rb")
-        status = (404,"not found")
-    else:
-        print("ok")
-        status = (200, "ok")
-    
-    cli.send(hrm(data["version"], status[0], status[1], data["header"], file.read()))
-    cli.close()
+        status = 400
+
+    if status == 200:
+        h = hashlib.sha256()
+        h.update(response)
+        etag = b'"' + h.hexdigest().encode("utf-8") + b'"'
+        if etag == headers.get("IF-NONE-MATCH"):
+            status = 304
+            response = b""
+
+    writer.write(b"HTTP/1.1 " + str(status).encode("utf-8") + b' ' + http_status[status] + b"\r\n")
+    res_headers = get_header()
+    if etag:
+        res_headers[b"ETag"] = etag
+    for key, value in res_headers.items():
+        writer.write(key + b": " + value + b"\r\n")
+    writer.write(b"\r\n" + response)
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def main():
+    server = await asyncio.start_server(handle_http, settings["HOST"], settings["PORT"])
+    print(f"listening on {settings['HOST']}:{settings['PORT']}")
+    async with server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
